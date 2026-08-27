@@ -8,4 +8,4 @@ class UserStates(StatesGroup):
 
 class AdminStates(StatesGroup):
     waiting_mb_email = State()
-    waiting_mb_product_id = State()
+    waiting_mb_service_name = State()

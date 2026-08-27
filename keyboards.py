@@ -11,31 +11,40 @@ def main_menu_kb() -> InlineKeyboardMarkup:
     return b.as_markup()
 
 
-def my_emails_kb(emails: list[str]) -> InlineKeyboardMarkup:
+def _mailbox_label(item: dict) -> str:
+    """Формат: [Название сервиса] 📧 email, или просто 📧 email, если метка не задана."""
+    service_name = item.get("service_name")
+    email = item.get("email", "")
+    if service_name:
+        return f"[{service_name}] 📧 {email}"
+    return f"📧 {email}"
+
+
+def my_emails_kb(mailboxes: list[dict]) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    for email in emails:
-        b.button(text=f"📧 {email}", callback_data=f"get_code:{email}")
+    for mb in mailboxes:
+        b.button(text=_mailbox_label(mb), callback_data=f"get_code:{mb['email']}")
     b.button(text="➕ Добавить почту", callback_data="add_email")
-    if emails:
+    if mailboxes:
         b.button(text="🗑 Удалить почту", callback_data="delete_email_menu")
     b.button(text="◀️ Назад", callback_data="main_menu")
     b.adjust(1)
     return b.as_markup()
 
 
-def select_email_for_code_kb(emails: list[str]) -> InlineKeyboardMarkup:
+def select_email_for_code_kb(mailboxes: list[dict]) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    for email in emails:
-        b.button(text=f"📧 {email}", callback_data=f"get_code:{email}")
+    for mb in mailboxes:
+        b.button(text=_mailbox_label(mb), callback_data=f"get_code:{mb['email']}")
     b.button(text="◀️ Назад", callback_data="main_menu")
     b.adjust(1)
     return b.as_markup()
 
 
-def delete_email_kb(emails: list[str]) -> InlineKeyboardMarkup:
+def delete_email_kb(mailboxes: list[dict]) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    for email in emails:
-        b.button(text=f"❌ {email}", callback_data=f"delete_email:{email}")
+    for mb in mailboxes:
+        b.button(text=f"❌ {_mailbox_label(mb)}", callback_data=f"delete_email:{mb['email']}")
     b.button(text="◀️ Назад", callback_data="my_emails")
     b.adjust(1)
     return b.as_markup()
@@ -75,7 +84,8 @@ def admin_mailboxes_kb(mailboxes: list[dict]) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     for mb in mailboxes:
         icon = "✅" if mb["is_active"] else "❌"
-        b.button(text=f"{icon} {mb['email']}", callback_data=f"admin_mb:{mb['id']}")
+        label = f"[{mb['service_name']}] {mb['email']}" if mb.get("service_name") else mb["email"]
+        b.button(text=f"{icon} {label}", callback_data=f"admin_mb:{mb['id']}")
     b.button(text="➕ Добавить почту", callback_data="admin_add_mb")
     b.button(text="◀️ Назад", callback_data="admin_menu")
     b.adjust(1)

@@ -100,21 +100,16 @@ async def get_purchase_raw(invoice_id: str) -> dict | None:
         return None
 
 
-async def verify_order(invoice_id: str, expected_product_id: str | None) -> dict:
+async def verify_order(invoice_id: str) -> dict:
     """
-    Проверяет, что заказ существует, оплачен и относится к нужному товару.
+    Проверяет, что заказ существует и оплачен (без сверки конкретного товара).
 
     Возвращает {"ok": bool, "reason": str, "raw": dict|None}, reason:
-      ok            -- всё сошлось
-      no_config     -- для этой почты не привязан product_id
-      api_error     -- сбой сети/авторизации на стороне GGsel
-      not_found     -- заказ с таким номером не найден
-      not_paid      -- заказ найден, но не в статусе "оплачен/выполнен"
-      wrong_product -- заказ оплачен, но товар не совпадает
+      ok        -- заказ найден и оплачен
+      api_error -- сбой сети/авторизации на стороне GGsel
+      not_found -- заказ с таким номером не найден
+      not_paid  -- заказ найден, но не в статусе "оплачен/выполнен"
     """
-    if not expected_product_id:
-        return {"ok": False, "reason": "no_config", "raw": None}
-
     raw = await get_purchase_raw(invoice_id)
     if raw is None:
         return {"ok": False, "reason": "api_error", "raw": None}
@@ -122,13 +117,8 @@ async def verify_order(invoice_id: str, expected_product_id: str | None) -> dict
         return {"ok": False, "reason": "not_found", "raw": raw}
 
     content = raw.get("content") or {}
-
     invoice_state = content.get("invoice_state")
     if invoice_state not in _PAID_STATES:
         return {"ok": False, "reason": "not_paid", "raw": raw}
-
-    item_id = content.get("item_id")
-    if item_id is None or str(item_id) != str(expected_product_id):
-        return {"ok": False, "reason": "wrong_product", "raw": raw}
 
     return {"ok": True, "reason": "ok", "raw": raw}

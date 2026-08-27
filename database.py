@@ -20,7 +20,7 @@ async def init_db():
         for col, typ in [
             ("imap_email", "TEXT"),
             ("imap_password", "TEXT"),
-            ("product_id", "TEXT"),
+            ("service_name", "TEXT"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE shared_mailboxes ADD COLUMN {col} {typ}")
@@ -59,12 +59,12 @@ async def init_db():
             )
         """)
         await db.execute("""
-            CREATE TABLE IF NOT EXISTS used_orders (
+            CREATE TABLE IF NOT EXISTS order_bindings (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                invoice_id TEXT UNIQUE NOT NULL,
+                invoice_id TEXT NOT NULL,
                 user_id INTEGER NOT NULL,
-                email TEXT NOT NULL,
-                used_at TEXT DEFAULT (datetime('now'))
+                created_at TEXT DEFAULT (datetime('now')),
+                UNIQUE(invoice_id, user_id)
             )
         """)
         await db.commit()
@@ -94,14 +94,14 @@ async def get_all_shared_mailboxes() -> list[dict]:
 async def add_shared_mailbox(
     email: str, password: str,
     imap_email: str | None = None, imap_password: str | None = None,
-    product_id: str | None = None,
+    service_name: str | None = None,
 ) -> bool:
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
-                "INSERT INTO shared_mailboxes (email, password, imap_email, imap_password, product_id) "
+                "INSERT INTO shared_mailboxes (email, password, imap_email, imap_password, service_name) "
                 "VALUES (?, ?, ?, ?, ?)",
-                (email, password, imap_email, imap_password, product_id),
+                (email, password, imap_email, imap_password, service_name),
             )
             await db.commit()
         return True
@@ -131,6 +131,23 @@ async def get_user_emails(user_id: int) -> list[dict]:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM user_emails WHERE user_id = ? ORDER BY added_at DESC",
+            (user_id,),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_user_emails_with_service(user_id: int) -> list[dict]:
+    """То же самое, но с меткой сервиса (service_name) из shared_mailboxes."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """
+            SELECT ue.email AS email, sm.service_name AS service_name
+            FROM user_emails ue
+            LEFT JOIN shared_mailboxes sm ON sm.email = ue.email
+            WHERE ue.user_id = ?
+            ORDER BY ue.added_at DESC
+            """,
             (user_id,),
         ) as cur:
             return [dict(r) for r in await cur.fetchall()]
@@ -315,23 +332,35 @@ async def get_recent_logs(limit: int = 15) -> list[dict]:
 
 # ── GGsel order verification ──────────────────────────────────────────────────
 
-async def is_order_used(invoice_id: str) -> bool:
+async def bind_order_to_user(invoice_id: str, user_id: int) -> str:
+    """
+    Привязывает номер заказа к телеграм-аккаунту. Максимум 2 разных
+    пользователя на один номер заказа (например, покупатель + друг).
+
+    Возвращает "ok" (привязка есть/только что создана) или "limit_reached"
+    (уже привязаны 2 других пользователя).
+    """
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
-            "SELECT 1 FROM used_orders WHERE invoice_id = ?", (invoice_id,)
+            "SELECT 1 FROM order_bindings WHERE invoice_id = ? AND user_id = ?",
+            (invoice_id, user_id),
         ) as cur:
-            return await cur.fetchone() is not None
+            if await cur.fetchone():
+                return "ok"  # уже привязан этот пользователь
 
+        async with db.execute(
+            "SELECT COUNT(DISTINCT user_id) FROM order_bindings WHERE invoice_id = ?",
+            (invoice_id,),
+        ) as cur:
+            row = await cur.fetchone()
+            count = row[0] if row else 0
 
-async def mark_order_used(invoice_id: str, user_id: int, email: str) -> bool:
-    try:
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute(
-                "INSERT INTO used_orders (invoice_id, user_id, email) VALUES (?, ?, ?)",
-                (invoice_id, user_id, email),
-            )
-            await db.commit()
-        return True
-    except Exception:
-        # UNIQUE constraint -- заказ уже кем-то использован между проверкой и этим вызовом
-        return False
+        if count >= 2:
+            return "limit_reached"
+
+        await db.execute(
+            "INSERT INTO order_bindings (invoice_id, user_id) VALUES (?, ?)",
+            (invoice_id, user_id),
+        )
+        await db.commit()
+        return "ok"
