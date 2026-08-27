@@ -1,14 +1,8 @@
 """
-Утилита для проверки интеграции с GGsel/Digiseller API до запуска бота
-в бою.
+Утилита для проверки интеграции с GGsel API до запуска бота в бою.
 
 Использование:
     python check_ggsel.py <номер_заказа>
-
-Печатает сырой JSON-ответ /api/purchases/info по этому заказу.
-Посмотрите, в каком поле приходит ID товара (обычно id_d, но может
-называться иначе) -- и, если он отличается от списка в ggsel.py
-(_PRODUCT_ID_FIELDS), допишите туда правильное имя поля.
 """
 import asyncio
 import json
@@ -31,15 +25,12 @@ async def main():
 
     print(json.dumps(raw, ensure_ascii=False, indent=2))
 
-    found = ggsel._extract_product_id(raw)
-    if found:
-        print(f"\n✅ Поле с ID товара найдено: {found}")
-    else:
-        print(
-            "\n⚠️ Не нашёл ID товара ни в одном из ожидаемых полей "
-            f"{ggsel._PRODUCT_ID_FIELDS}. Посмотри в JSON выше, как называется "
-            "нужное поле, и добавь его имя в ggsel._PRODUCT_ID_FIELDS."
-        )
+    content = raw.get("content") or {}
+    item_id = content.get("item_id")
+    invoice_state = content.get("invoice_state")
+
+    print(f"\nitem_id (ID товара): {item_id}")
+    print(f"invoice_state (статус): {invoice_state} (3=оплачен, 4=выполнен -- считаются оплаченными)")
 
 
 if __name__ == "__main__":
