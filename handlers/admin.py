@@ -84,11 +84,11 @@ async def cb_admin_mb_detail(call: CallbackQuery):
         return
 
     status = "✅ Активна" if mb["is_active"] else "❌ Неактивна"
-    product_id = mb.get("product_id") or "не привязан ⚠️"
+    service_line = f"🎮 Сервис: <b>{mb['service_name']}</b>\n" if mb.get("service_name") else ""
     await call.message.edit_text(
         f"📬 <b>{mb['email']}</b>\n\n"
-        f"Статус: {status}\n"
-        f"🔢 Товар GGsel: <code>{product_id}</code>",
+        f"{service_line}"
+        f"Статус: {status}",
         reply_markup=admin_mb_actions_kb(mb_id, mb["is_active"]),
         parse_mode="HTML",
     )
@@ -133,124 +133,14 @@ async def msg_mb_email(message: Message, state: FSMContext):
         return
     email = message.text.strip().lower()
     await state.update_data(email=email)
-    await state.set_state(AdminStates.waiting_mb_product_id)
+    await state.set_state(AdminStates.waiting_mb_service_name)
     await message.answer(
-        "🔢 <b>Привязка к товару GGsel</b>\n\n"
-        "Введи ID товара (product_id) на GGsel/Digiseller, который соответствует "
-        "этой почте — именно с ним будет сверяться номер заказа при выдаче кода.\n\n"
-        "ID товара можно найти в личном кабинете Digiseller в свойствах товара "
-        "или в ссылке на страницу товара.",
+        "🎮 <b>Название сервиса</b>\n\n"
+        "Введи, как подписать эту почту для покупателя, например: <code>Rockstar Games</code> "
+        "или <code>EA</code>. Покупатель увидит эту подпись рядом с почтой в «Мои почты».",
         parse_mode="HTML",
     )
 
 
-@router.message(AdminStates.waiting_mb_product_id)
-async def msg_mb_product_id(message: Message, state: FSMContext):
-    if not _is_admin(message.from_user.id):
-        return
-    data = await state.get_data()
-    email = data.get("email")
-    product_id = message.text.strip()
-    await state.clear()
-
-    if not email:
-        await message.answer("❌ Что-то пошло не так, начни заново.", reply_markup=back_kb("admin_mailboxes"))
-        return
-
-    success = await db.add_shared_mailbox(email=email, password="", product_id=product_id)
-
-    if success:
-        await message.answer(
-            f"✅ Почта <code>{email}</code> добавлена и привязана к товару <code>{product_id}</code>!",
-            parse_mode="HTML",
-            reply_markup=back_kb("admin_mailboxes"),
-        )
-    else:
-        await message.answer(
-            "❌ Ошибка — такая почта уже существует или произошёл сбой.",
-            reply_markup=back_kb("admin_mailboxes"),
-        )
-
-
-# ── Пользователи ──────────────────────────────────────────────────────────────
-
-@router.callback_query(F.data == "admin_users")
-async def cb_admin_users(call: CallbackQuery):
-    if not _is_admin(call.from_user.id):
-        return
-    users = await db.get_all_users_with_emails()
-
-    if not users:
-        await call.message.edit_text("👥 Пользователей нет.", reply_markup=back_kb("admin_menu"))
-        return
-
-    user_map: dict[int, list[str]] = defaultdict(list)
-    usernames: dict[int, str] = {}
-    for u in users:
-        user_map[u["user_id"]].append(u["email"])
-        if u.get("username"):
-            usernames[u["user_id"]] = u["username"]
-
-    lines = []
-    for i, (uid, emails) in enumerate(list(user_map.items())[:20], 1):
-        uname = f"@{usernames[uid]}" if uid in usernames else f"ID:{uid}"
-        lines.append(f"{i}. {uname}")
-        for e in emails:
-            lines.append(f"   └ <code>{e}</code>")
-
-    extra = f"\n...и ещё {len(user_map) - 20}" if len(user_map) > 20 else ""
-    await call.message.edit_text(
-        "👥 <b>Пользователи</b>\n\n" + "\n".join(lines) + extra,
-        reply_markup=back_kb("admin_menu"),
-        parse_mode="HTML",
-    )
-
-
-# ── Статистика ────────────────────────────────────────────────────────────────
-
-@router.callback_query(F.data == "admin_stats")
-async def cb_admin_stats(call: CallbackQuery):
-    if not _is_admin(call.from_user.id):
-        return
-    s = await db.get_stats()
-    total = s["total_requests"] or 1
-    success_pct = s["success_requests"] * 100 // total
-    timeout_pct = s["timeout_requests"] * 100 // total
-
-    await call.message.edit_text(
-        "📊 <b>Статистика</b>\n\n"
-        f"👥 Уникальных пользователей: <b>{s['total_users']}</b>\n"
-        f"📬 Активных общих почт: <b>{s['active_mailboxes']}</b>\n\n"
-        f"📈 Всего запросов: <b>{s['total_requests']}</b>\n"
-        f"✅ Успешно: <b>{s['success_requests']}</b> ({success_pct}%)\n"
-        f"⏱ Таймаут: <b>{s['timeout_requests']}</b> ({timeout_pct}%)",
-        reply_markup=back_kb("admin_menu"),
-        parse_mode="HTML",
-    )
-
-
-# ── Логи ──────────────────────────────────────────────────────────────────────
-
-@router.callback_query(F.data == "admin_logs")
-async def cb_admin_logs(call: CallbackQuery):
-    if not _is_admin(call.from_user.id):
-        return
-    logs = await db.get_recent_logs(15)
-
-    if not logs:
-        await call.message.edit_text("📋 Логов нет.", reply_markup=back_kb("admin_menu"))
-        return
-
-    icons = {"success": "✅", "timeout": "⏱", "spam": "🚫", "pending": "⏳"}
-    lines = []
-    for log in logs:
-        icon = icons.get(log["status"], "❓")
-        code_str = f" → <code>{log['code']}</code>" if log.get("code") else ""
-        lines.append(f"{icon} <code>{log['email'][:25]}</code>{code_str}")
-        lines.append(f"   {log['created_at'][:16]}")
-
-    await call.message.edit_text(
-        "📋 <b>Последние 15 запросов</b>\n\n" + "\n".join(lines),
-        reply_markup=back_kb("admin_menu"),
-        parse_mode="HTML",
-    )
+@router.message(AdminStates.waiting_mb_service_name)
+async
