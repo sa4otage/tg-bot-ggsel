@@ -331,7 +331,13 @@ async def get_recent_logs(limit: int = 15) -> list[dict]:
 
 
 # ── GGsel order verification ──────────────────────────────────────────────────
-
+async def has_bound_order(user_id: int) -> bool:
+    """Есть ли у пользователя хотя бы одна привязка номера заказа."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT 1 FROM order_bindings WHERE user_id = ? LIMIT 1", (user_id,)
+        ) as cur:
+            return await cur.fetchone() is not None
 async def bind_order_to_user(invoice_id: str, user_id: int) -> str:
     """
     Привязывает номер заказа к телеграм-аккаунту. Максимум 2 разных
