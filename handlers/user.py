@@ -28,9 +28,10 @@ logger = logging.getLogger(__name__)
 INSTRUCTION_TEXT = (
     "📖 <b>Инструкция по использованию бота</b>\n\n"
     "1️⃣ Перейди в раздел <b>«Мои почты»</b> и добавь почту полученную при покупке\n(Например: <code>gta5@outlook.com</code>)\n\n"
-    "2️⃣ Нажми <b>«Запросить код»</b> и выбери необходимую почту которую ты добавил ранее\n\n"
-    "3️⃣ Введи номер своего заказа GGsel (указан в письме об оплате)\n\n"
-    "4️⃣ Запроси код в лаунчере для входа в игру (Например: EA, Rockstar Games)\n\n"
+    "2️⃣ Нажми <b>«Запросить код»</b> и выбери нужную почту\n\n"
+    "3️⃣ При первом запросе введи номер своего заказа GGsel (указан в письме об оплате) "
+    "— это нужно сделать только один раз, дальше коды можно запрашивать с любых почт без повторного ввода\n\n"
+    "4️⃣ Запроси код в лаунчере для входа (Например: EA, Rockstar Games)\n\n"
     "5️⃣ Бот автоматически поймает письмо и отправит тебе код\n\n"
     "⚠️ <b>Ограничения:</b>\n"
     f"• Максимум {SPAM_LIMIT} запроса на одну почту за {SPAM_WINDOW // 60} минут\n"
@@ -46,7 +47,7 @@ async def cmd_start(message: Message, state: FSMContext):
     logger.info(f"START from user_id={message.from_user.id} @{message.from_user.username} {message.from_user.first_name}")
     await message.answer(
         f"👋 Привет, <b>{message.from_user.first_name}</b>!\n\n"
-        "Я помогу получить код подтверждения из почты Rockstar Games.\n\n"
+        "Я помогу получить код подтверждения из почты.\n\n"
         "Выбери действие:",
         reply_markup=main_menu_kb(),
         parse_mode="HTML",
@@ -83,11 +84,7 @@ async def cb_my_emails(call: CallbackQuery):
     if not mailboxes:
         text = "📭 <b>Мои почты</b>\n\nУ тебя ещё нет добавленных почт. Добавь первую!"
     else:
-        def _line(i, mb):
-            label = f"[{mb['service_name']}] " if mb.get("service_name") else ""
-            return f"{i}. {label}<code>{mb['email']}</code>"
-        lines = "\n".join(_line(i, mb) for i, mb in enumerate(mailboxes, 1))
-        text = f"📬 <b>Мои почты</b>\n\n{lines}"
+        text = "📬 <b>Мои почты</b>\n\nВыбери почту ниже, чтобы запросить код, или добавь новую."
 
     await call.message.edit_text(text, reply_markup=my_emails_kb(mailboxes), parse_mode="HTML")
 
@@ -188,6 +185,7 @@ async def cb_request_code(call: CallbackQuery):
 @router.callback_query(F.data.startswith("get_code:"))
 async def cb_get_code(call: CallbackQuery, state: FSMContext):
     email = call.data.split(":", 1)[1]
+    user_id = call.from_user.id
 
     # Проверяем что почта есть в базе
     mailbox = await db.get_shared_mailbox(email)
@@ -195,11 +193,19 @@ async def cb_get_code(call: CallbackQuery, state: FSMContext):
         await call.answer("❌ Почта недоступна. Обратись к администратору.", show_alert=True)
         return
 
+    # Номер заказа спрашиваем только один раз за всё время: если у пользователя
+    # уже есть привязанный заказ -- сразу переходим к ожиданию кода.
+    if await db.has_bound_order(user_id):
+        await _start_waiting(call.message, user_id, call.from_user.username, email, call.message.chat.id)
+        return
+
     await state.set_state(UserStates.waiting_order_number)
     await state.update_data(email=email)
     await call.message.edit_text(
         f"📧 <b>Почта:</b> <code>{email}</code>\n\n"
-        "🧾 Введи номер своего заказа GGsel (указан в письме об оплате):",
+        "🧾 Прежде чем начать, введи номер своего заказа GGsel (указан в письме об оплате).\n\n"
+        "Это нужно сделать только один раз — дальше сможешь запрашивать коды "
+        "с любых своих почт без повторного ввода.",
         reply_markup=cancel_kb(),
         parse_mode="HTML",
     )
@@ -210,6 +216,42 @@ _ORDER_ERROR_TEXTS = {
     "not_paid": "❌ Этот заказ ещё не оплачен или отменён.",
     "api_error": "⚠️ Не удалось проверить заказ (сбой на стороне GGsel). Попробуй через минуту.",
 }
+
+
+async def _start_waiting(edit_target, user_id: int, username: str | None, email: str, chat_id: int):
+    """Общая логика перехода в режим ожидания кода (антиспам, занятость, таймер)."""
+    count = await db.count_recent_requests(user_id, email, SPAM_WINDOW)
+    if count >= SPAM_LIMIT:
+        await db.log_request(user_id, username, email, "spam")
+        await edit_target.edit_text(
+            f"⚠️ Лимит исчерпан!\nМаксимум {SPAM_LIMIT} запроса на одну почту за {_SPAM_WINDOW_MIN} минут.",
+            reply_markup=back_kb("main_menu"),
+        )
+        return
+
+    existing = await db.get_pendings_by_email(email)
+    if any(p["user_id"] != user_id for p in existing):
+        await edit_target.edit_text(
+            "⏳ Эта почта сейчас занята — другой пользователь уже ожидает код.\n"
+            "Попробуй через минуту.",
+            reply_markup=back_kb("main_menu"),
+        )
+        return
+
+    await db.log_request(user_id, username, email, "pending")
+
+    msg = await edit_target.edit_text(
+        f"📧 <b>Почта:</b> <code>{email}</code>\n\n"
+        "🎮 Теперь запросите код в лаунчере\n\n"
+        f"⏳ Ожидаю код... [0/{CODE_TIMEOUT} сек]",
+        parse_mode="HTML",
+        reply_markup=cancel_code_kb(email),
+    )
+
+    await db.create_pending(user_id, email, chat_id, msg.message_id, 0)
+
+    from bot import bot
+    await poller.start_timer(bot, user_id, email, chat_id, msg.message_id)
 
 
 @router.message(UserStates.waiting_order_number)
@@ -247,43 +289,7 @@ async def msg_order_number(message: Message, state: FSMContext):
         return
 
     await state.clear()
-
-    # Антиспам
-    count = await db.count_recent_requests(user_id, email, SPAM_WINDOW)
-    if count >= SPAM_LIMIT:
-        await db.log_request(user_id, message.from_user.username, email, "spam")
-        await checking_msg.edit_text(
-            f"⚠️ Лимит исчерпан!\nМаксимум {SPAM_LIMIT} запроса на одну почту за {_SPAM_WINDOW_MIN} минут.",
-            reply_markup=back_kb("main_menu"),
-        )
-        return
-
-    # Проверяем не занята ли почта другим пользователем
-    existing = await db.get_pendings_by_email(email)
-    if any(p["user_id"] != user_id for p in existing):
-        await checking_msg.edit_text(
-            "⏳ Эта почта сейчас занята — другой пользователь уже ожидает код.\n"
-            "Попробуй через минуту.",
-            reply_markup=back_kb("main_menu"),
-        )
-        return
-
-    # Логируем запрос
-    await db.log_request(user_id, message.from_user.username, email, "pending")
-
-    # Отправляем сообщение ожидания
-    msg = await checking_msg.edit_text(
-        f"📧 <b>Почта:</b> <code>{email}</code>\n\n"
-        "🎮 Запросите код в лаунчере\n\n"
-        f"⏳ Ожидаю код... [0/{CODE_TIMEOUT} сек]",
-        parse_mode="HTML",
-        reply_markup=cancel_code_kb(email),
-    )
-
-    await db.create_pending(user_id, email, message.chat.id, msg.message_id, 0)
-
-    from bot import bot
-    await poller.start_timer(bot, user_id, email, message.chat.id, msg.message_id)
+    await _start_waiting(checking_msg, user_id, message.from_user.username, email, message.chat.id)
 
 
 @router.callback_query(F.data.startswith("cancel_code:"))
