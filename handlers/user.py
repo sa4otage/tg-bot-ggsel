@@ -78,16 +78,18 @@ async def cb_instruction(call: CallbackQuery):
 
 @router.callback_query(F.data == "my_emails")
 async def cb_my_emails(call: CallbackQuery):
-    emails_data = await db.get_user_emails(call.from_user.id)
-    emails = [e["email"] for e in emails_data]
+    mailboxes = await db.get_user_emails_with_service(call.from_user.id)
 
-    if not emails:
+    if not mailboxes:
         text = "📭 <b>Мои почты</b>\n\nУ тебя ещё нет добавленных почт. Добавь первую!"
     else:
-        lines = "\n".join(f"{i}. <code>{e}</code>" for i, e in enumerate(emails, 1))
+        def _line(i, mb):
+            label = f"[{mb['service_name']}] " if mb.get("service_name") else ""
+            return f"{i}. {label}<code>{mb['email']}</code>"
+        lines = "\n".join(_line(i, mb) for i, mb in enumerate(mailboxes, 1))
         text = f"📬 <b>Мои почты</b>\n\n{lines}"
 
-    await call.message.edit_text(text, reply_markup=my_emails_kb(emails), parse_mode="HTML")
+    await call.message.edit_text(text, reply_markup=my_emails_kb(mailboxes), parse_mode="HTML")
 
 
 @router.callback_query(F.data == "add_email")
@@ -140,16 +142,15 @@ async def msg_add_email(message: Message, state: FSMContext):
 
 @router.callback_query(F.data == "delete_email_menu")
 async def cb_delete_email_menu(call: CallbackQuery):
-    emails_data = await db.get_user_emails(call.from_user.id)
-    emails = [e["email"] for e in emails_data]
+    mailboxes = await db.get_user_emails_with_service(call.from_user.id)
 
-    if not emails:
+    if not mailboxes:
         await call.answer("У тебя нет добавленных почт", show_alert=True)
         return
 
     await call.message.edit_text(
         "🗑 <b>Удаление почты</b>\n\nВыбери почту для удаления:",
-        reply_markup=delete_email_kb(emails),
+        reply_markup=delete_email_kb(mailboxes),
         parse_mode="HTML",
     )
 
@@ -166,10 +167,9 @@ async def cb_delete_email(call: CallbackQuery):
 
 @router.callback_query(F.data == "request_code")
 async def cb_request_code(call: CallbackQuery):
-    emails_data = await db.get_user_emails(call.from_user.id)
-    emails = [e["email"] for e in emails_data]
+    mailboxes = await db.get_user_emails_with_service(call.from_user.id)
 
-    if not emails:
+    if not mailboxes:
         await call.message.edit_text(
             "📭 У тебя нет добавленных почт.\n\n"
             "Сначала добавь почту в разделе «Мои почты».",
@@ -180,7 +180,7 @@ async def cb_request_code(call: CallbackQuery):
 
     await call.message.edit_text(
         "📬 <b>Запросить код</b>\n\nВыбери почту:",
-        reply_markup=select_email_for_code_kb(emails),
+        reply_markup=select_email_for_code_kb(mailboxes),
         parse_mode="HTML",
     )
 
@@ -208,9 +208,7 @@ async def cb_get_code(call: CallbackQuery, state: FSMContext):
 _ORDER_ERROR_TEXTS = {
     "not_found": "❌ Заказ с таким номером не найден. Проверь номер и попробуй ещё раз.",
     "not_paid": "❌ Этот заказ ещё не оплачен или отменён.",
-    "wrong_product": "❌ Этот номер заказа относится к другому товару.",
     "api_error": "⚠️ Не удалось проверить заказ (сбой на стороне GGsel). Попробуй через минуту.",
-    "no_config": "⚠️ Для этой почты не настроена проверка заказа. Обратись к администратору.",
 }
 
 
@@ -227,17 +225,9 @@ async def msg_order_number(message: Message, state: FSMContext):
         await message.answer("❌ Что-то пошло не так, начни заново.", reply_markup=back_kb("main_menu"))
         return
 
-    if await db.is_order_used(order_number):
-        await message.answer(
-            "❌ Этот номер заказа уже был использован для получения кода ранее.\n"
-            "Если это ошибка — обратись к администратору.",
-            reply_markup=cancel_kb(),
-        )
-        return
-
     checking_msg = await message.answer("🔎 Проверяю заказ...")
 
-    result = await ggsel.verify_order(order_number, mailbox.get("product_id"))
+    result = await ggsel.verify_order(order_number)
     if not result["ok"]:
         text = _ORDER_ERROR_TEXTS.get(result["reason"], "❌ Не удалось проверить заказ.")
         logger.warning(
@@ -247,9 +237,11 @@ async def msg_order_number(message: Message, state: FSMContext):
         await checking_msg.edit_text(text, reply_markup=cancel_kb())
         return
 
-    if not await db.mark_order_used(order_number, user_id, email):
+    bind_result = await db.bind_order_to_user(order_number, user_id)
+    if bind_result == "limit_reached":
         await checking_msg.edit_text(
-            "❌ Этот номер заказа уже был использован для получения кода ранее.",
+            "❌ Этим номером заказа уже пользуются 2 других Telegram-аккаунта — "
+            "лимит достигнут. Обратись к администратору, если это ошибка.",
             reply_markup=cancel_kb(),
         )
         return
